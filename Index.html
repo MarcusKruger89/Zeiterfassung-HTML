@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Zeiterfassung</title>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Zeiterfassung" />
+<meta name="theme-color" content="#EFF1EC" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231C2321'/%3E%3Ctext x='50' y='68' font-size='58' font-family='Georgia,serif' fill='%23EFF1EC' text-anchor='middle'%3EZ%3C/text%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231C2321'/%3E%3Ctext x='50' y='68' font-size='58' font-family='Georgia,serif' fill='%23EFF1EC' text-anchor='middle'%3EZ%3C/text%3E%3C/svg%3E" />
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #EFF1EC; overscroll-behavior-y: contain; }
+  #root { min-height: 100vh; }
+  button { font-family: inherit; }
+  @media print {
+    body * { visibility: hidden; }
+    .print-area, .print-area * { visibility: visible; }
+    .print-area { position: absolute; top: 0; left: 0; width: 100%; }
+    .no-print { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+const MONO = "'IBM Plex Mono', ui-monospace, monospace";
+const DISPLAY = "'Barlow Condensed', sans-serif";
+const BODY = "'Inter', sans-serif";
+
+const INK = "#1C2321";
+const PAPER = "#EFF1EC";
+const PAPER_LINE = "#D8DBD3";
+const TEAL = "#2F6E63";
+const RUST = "#B4562B";
+const GOLD = "#B98A2E";
+const BLUE = "#4C6E8C";
+const PURPLE = "#7C6A99";
+const CARD = "#F8F8F5";
+
+const WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+const MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
+
+const TYPES = {
+  arbeit: { label: "Arbeit", icon: "💼", color: INK },
+  urlaub: { label: "Urlaub", icon: "🌴", color: GOLD },
+  krank: { label: "Krank", icon: "🤒", color: RUST },
+  feiertag: { label: "Feiertag", icon: "⭐", color: BLUE },
+  abbau: { label: "Abbau", icon: "📉", color: PURPLE },
+};
+
+function timeToMinutes(t) {
+  if (!t) return null;
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+function computeArbeitsstunden(start, end, pause) {
+  const s = timeToMinutes(start), e = timeToMinutes(end);
+  if (s == null || e == null) return 0;
+  let diff = e - s;
+  if (diff < 0) diff += 24 * 60;
+  diff -= Number(pause) || 0;
+  return Math.max(0, diff) / 60;
+}
+
+function pad(n) { return String(n).padStart(2, "0"); }
+function dateKey(y, m, d) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
+function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
+function isWeekday(y, m, d) { const wd = new Date(y, m, d).getDay(); return wd !== 0 && wd !== 6; }
+function isBeforeStart(y, m, d, startDatum) {
+  if (!startDatum) return false;
+  return dateKey(y, m, d) < startDatum;
+}
+function fmtHours(h) {
+  const sign = h < 0 ? "-" : h > 0 ? "+" : "";
+  return `${sign}${Math.abs(h).toFixed(1)}`;
+}
+
+function loadLocal(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) { return fallback; }
+}
+function saveLocal(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+}
+
+function App() {
+  const [settings, setSettings] = useState(() => loadLocal("ze_settings", {
+    sollProTag: 8, urlaubProJahr: 30, startDatum: null, anfangsSaldo: 0,
+    urlaubUebertrag: 0, firmenname: "", mitarbeitername: ""
+  }));
+  const [entries, setEntries] = useState(() => loadLocal("ze_entries", {}));
+  const [cursor, setCursor] = useState(() => { const n = new Date(); return { y: n.getFullYear(), m: n.getMonth() }; });
+  const [showSettings, setShowSettings] = useState(false);
+  const [editDay, setEditDay] = useState(null);
+  const [showPrint, setShowPrint] = useState(false);
+  const [showChart, setShowChart] = useState(false);
+
+  const persistEntries = useCallback((next) => { setEntries(next); saveLocal("ze_entries", next); }, []);
+  const persistSettings = useCallback((next) => { setSettings(next); saveLocal("ze_settings", next); }, []);
+
+  const monthStats = useMemo(() => {
+    const { y, m } = cursor;
+    const total = daysInMonth(y, m);
+    let weekdayCount = 0, ist = 0, urlaubTage = 0, krankTage = 0, feiertagTage = 0, abbauTage = 0;
+    for (let d = 1; d <= total; d++) {
+      if (isBeforeStart(y, m, d, settings.startDatum)) continue;
+      const wd = isWeekday(y, m, d);
+      if (wd) weekdayCount++;
+      const entry = entries[dateKey(y, m, d)];
+      if (!entry) continue;
+      if (entry.type === "arbeit") ist += Number(entry.stunden) || 0;
+      if (entry.type === "urlaub" && wd) urlaubTage++;
+      if (entry.type === "krank" && wd) krankTage++;
+      if (entry.type === "feiertag" && wd) feiertagTage++;
+      if (entry.type === "abbau" && wd) abbauTage++;
+    }
+    const soll = (weekdayCount - urlaubTage - krankTage - feiertagTage - abbauTage) * settings.sollProTag;
+    const saldo = ist - soll;
+    return { soll, ist, saldo, urlaubTage, krankTage, feiertagTage, abbauTage, weekdayCount };
+  }, [cursor, entries, settings]);
+
+  const yearStats = useMemo(() => {
+    const y = cursor.y;
+    let urlaubGenommen = 0;
+    Object.keys(entries).forEach((key) => {
+      const [ky, km, kd] = key.split("-").map(Number);
+      if (ky !== y) return;
+      const entry = entries[key];
+      if (entry.type === "urlaub" && isWeekday(ky, km - 1, kd)) urlaubGenommen++;
+    });
+    const anspruchGesamt = settings.urlaubProJahr + (Number(settings.urlaubUebertrag) || 0);
+    return { urlaubGenommen, anspruchGesamt, urlaubRest: anspruchGesamt - urlaubGenommen };
+  }, [cursor.y, entries, settings]);
+
+  const monatsHistorie = useMemo(() => {
+    let laufsaldo = Number(settings.anfangsSaldo) || 0;
+    const monthsWithData = Array.from(new Set(Object.keys(entries).map((k) => k.slice(0, 7)))).sort();
+    const result = [];
+    monthsWithData.forEach((ym) => {
+      const [yy, mm] = ym.split("-").map(Number);
+      const mIdx = mm - 1;
+      const total = daysInMonth(yy, mIdx);
+      let weekdayCount = 0, ist = 0, urlaubTage = 0, krankTage = 0, feiertagTage = 0, abbauTage = 0;
+      for (let d = 1; d <= total; d++) {
+        if (isBeforeStart(yy, mIdx, d, settings.startDatum)) continue;
+        const wd = isWeekday(yy, mIdx, d);
+        if (wd) weekdayCount++;
+        const entry = entries[dateKey(yy, mIdx, d)];
+        if (!entry) continue;
+        if (entry.type === "arbeit") ist += Number(entry.stunden) || 0;
+        if (entry.type === "urlaub" && wd) urlaubTage++;
+        if (entry.type === "krank" && wd) krankTage++;
+        if (entry.type === "feiertag" && wd) feiertagTage++;
+        if (entry.type === "abbau" && wd) abbauTage++;
+      }
+      const soll = (weekdayCount - urlaubTage - krankTage - feiertagTage - abbauTage) * settings.sollProTag;
+      const saldoMonat = ist - soll;
+      laufsaldo += saldoMonat;
+      result.push({ ym, label: `${MONTHS[mIdx].slice(0, 3)} ${String(yy).slice(2)}`, saldoMonat, laufsaldo });
+    });
+    return result;
+  }, [entries, settings]);
+
+  const alleZeitSaldo = monatsHistorie.length
+    ? monatsHistorie[monatsHistorie.length - 1].laufsaldo
+    : Number(settings.anfangsSaldo) || 0;
+
+  const changeMonth = (delta) => {
+    setCursor(({ y, m }) => {
+      let nm = m + delta, ny = y;
+      if (nm < 0) { nm = 11; ny -= 1; }
+      if (nm > 11) { nm = 0; ny += 1; }
+      return { y: ny, m: nm };
+    });
+  };
+
+  const saveEntry = (day, type, data) => {
+    const key = dateKey(cursor.y, cursor.m, day);
+    const next = { ...entries };
+    if (type === "leer") {
+      delete next[key];
+    } else if (type === "arbeit") {
+      const { start, end, pause, notiz } = data;
+      const stunden = computeArbeitsstunden(start, end, pause);
+      next[key] = { type, start, end, pause: Number(pause) || 0, stunden, notiz: notiz || "" };
+    } else {
+      next[key] = { type, stunden: 0, notiz: (data && data.notiz) || "" };
+    }
+    persistEntries(next);
+    setEditDay(null);
+  };
+
+  const total = daysInMonth(cursor.y, cursor.m);
+  const firstDow = (new Date(cursor.y, cursor.m, 1).getDay() + 6) % 7;
+
+  return (
+    <div style={{ fontFamily: BODY, background: PAPER, minHeight: "100vh", color: INK, padding: "18px 14px 40px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <div style={{ fontFamily: DISPLAY, fontSize: 15, letterSpacing: "0.14em", textTransform: "uppercase", color: "#6B7268" }}>
+          Zeiterfassung
+        </div>
+        <div style={{ display: "flex", gap: 2 }}>
+          <button onClick={() => setShowChart(true)} style={iconBtn}>📊</button>
+          <button onClick={() => setShowPrint(true)} style={iconBtn}>📤</button>
+          <button onClick={() => setShowSettings(true)} style={iconBtn}>⚙️</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "6px 0 16px" }}>
+        <button onClick={() => changeMonth(-1)} style={navBtn}>‹</button>
+        <div style={{ fontFamily: DISPLAY, fontSize: 30, fontWeight: 600, lineHeight: 1 }}>
+          {MONTHS[cursor.m]} <span style={{ color: "#8A9088" }}>{cursor.y}</span>
+        </div>
+        <button onClick={() => changeMonth(1)} style={navBtn}>›</button>
+      </div>
+
+      <div style={{ background: CARD, border: `1px solid ${PAPER_LINE}`, borderRadius: 4, padding: "14px 16px", marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+          <Stat label="Soll" value={monthStats.soll.toFixed(1)} />
+          <Stat label="Ist" value={monthStats.ist.toFixed(1)} />
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "#8A9088", marginBottom: 2 }}>Saldo</div>
+            <div style={{
+              display: "inline-block", fontFamily: MONO, fontWeight: 600, fontSize: 19,
+              color: monthStats.saldo >= 0 ? TEAL : RUST,
+              border: `2px solid ${monthStats.saldo >= 0 ? TEAL : RUST}`,
+              borderRadius: 4, padding: "1px 8px", transform: "rotate(-2deg)",
+            }}>
+              {fmtHours(monthStats.saldo)}
+            </div>
+          </div>
+        </div>
+        <div style={{ borderTop: `1px dashed ${PAPER_LINE}`, marginTop: 12, paddingTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px", fontSize: 12.5, color: "#6B7268" }}>
+          <span>Urlaub: <b style={{ color: INK }}>{monthStats.urlaubTage}</b></span>
+          <span>Krank: <b style={{ color: INK }}>{monthStats.krankTage}</b></span>
+          <span>Feiertag: <b style={{ color: INK }}>{monthStats.feiertagTage}</b></span>
+          <span>Abbau: <b style={{ color: INK }}>{monthStats.abbauTage}</b></span>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        <YearChip label="Urlaub übrig" value={`${yearStats.urlaubRest} / ${yearStats.anspruchGesamt}`} color={yearStats.urlaubRest < 0 ? RUST : GOLD} />
+        <YearChip label="Saldo gesamt" value={fmtHours(alleZeitSaldo)} color={alleZeitSaldo >= 0 ? TEAL : RUST} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 6 }}>
+        {WEEKDAYS.map((w) => (
+          <div key={w} style={{ textAlign: "center", fontSize: 11, color: "#8A9088", fontWeight: 600 }}>{w}</div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+        {Array.from({ length: firstDow }).map((_, i) => <div key={"e" + i} />)}
+        {Array.from({ length: total }).map((_, i) => {
+          const day = i + 1;
+          const key = dateKey(cursor.y, cursor.m, day);
+          const entry = entries[key];
+          const weekday = isWeekday(cursor.y, cursor.m, day);
+          const locked = isBeforeStart(cursor.y, cursor.m, day, settings.startDatum);
+          const t = entry ? TYPES[entry.type] : null;
+          return (
+            <button
+              key={day}
+              disabled={locked}
+              onClick={() => !locked && setEditDay(day)}
+              style={{
+                aspectRatio: "1", border: `1px solid ${PAPER_LINE}`, borderRadius: 4,
+                background: locked ? "#E7E9E3" : (t ? (entry.type === "arbeit" ? "#fff" : t.color + "20") : (weekday ? "#fff" : "#E7E9E3")),
+                cursor: locked ? "default" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                padding: 2, position: "relative", opacity: locked ? 0.4 : 1,
+              }}
+            >
+              <span style={{ fontSize: 12, fontFamily: MONO, color: weekday && !locked ? INK : "#9BA096" }}>{day}</span>
+              {entry && entry.type === "arbeit" && (
+                <span style={{ fontSize: 9, fontFamily: MONO, color: "#6B7268" }}>{entry.stunden}h</span>
+              )}
+              {entry && entry.type !== "arbeit" && (
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: t.color, marginTop: 1 }} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {editDay && (
+        <DayEditor
+          day={editDay}
+          y={cursor.y} m={cursor.m}
+          existing={entries[dateKey(cursor.y, cursor.m, editDay)]}
+          sollProTag={settings.sollProTag}
+          onClose={() => setEditDay(null)}
+          onSave={saveEntry}
+        />
+      )}
+
+      {showChart && <BalanceChart data={monatsHistorie} onClose={() => setShowChart(false)} />}
+
+      {showPrint && (
+        <PrintReport
+          y={cursor.y} m={cursor.m}
+          entries={entries}
+          settings={settings}
+          monthStats={monthStats}
+          onClose={() => setShowPrint(false)}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          settings={settings}
+          onSave={(s) => { persistSettings(s); setShowSettings(false); }}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "#8A9088", marginBottom: 2 }}>{label}</div>
+      <div style={{ fontFamily: MONO, fontWeight: 600, fontSize: 19 }}>{value}</div>
+    </div>
+  );
+}
+
+function YearChip({ label, value, color }) {
+  return (
+    <div style={{ flex: 1, background: "#fff", border: `1px solid ${PAPER_LINE}`, borderRadius: 4, padding: "8px 10px" }}>
+      <div style={{ fontSize: 10.5, color: "#8A9088", marginBottom: 2 }}>{label}</div>
+      <div style={{ fontFamily: MONO, fontWeight: 600, fontSize: 15, color }}>{value}</div>
+    </div>
+  );
+}
+
+const navBtn = { background: "#fff", border: `1px solid ${PAPER_LINE}`, borderRadius: 4, padding: "6px 14px", cursor: "pointer", color: INK, fontSize: 20, lineHeight: 1 };
+const iconBtn = { background: "none", border: "none", padding: 6, cursor: "pointer", fontSize: 17, display: "flex", alignItems: "center" };
+
+function DayEditor({ day, y, m, existing, sollProTag, onClose, onSave }) {
+  const [type, setType] = useState(existing?.type || "arbeit");
+  const [start, setStart] = useState(existing?.start || "08:00");
+  const [pause, setPause] = useState(existing?.pause ?? 30);
+  const defaultEndMinutes = 8 * 60 + sollProTag * 60 + 30;
+  const defaultEnd = `${pad(Math.floor(defaultEndMinutes / 60) % 24)}:${pad(defaultEndMinutes % 60)}`;
+  const [end, setEnd] = useState(existing?.end || defaultEnd);
+  const [notiz, setNotiz] = useState(existing?.notiz || "");
+  const berechnet = computeArbeitsstunden(start, end, pause);
+
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={sheet} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 600 }}>{day}. {MONTHS[m]} {y}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#8A9088", fontSize: 20 }}>✕</button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 14 }}>
+          {Object.entries(TYPES).map(([key, t]) => {
+            const active = type === key;
+            return (
+              <button key={key} onClick={() => setType(key)} style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+                padding: "10px 4px", borderRadius: 4, cursor: "pointer",
+                border: `1.5px solid ${active ? t.color : PAPER_LINE}`,
+                background: active ? t.color + "18" : "#fff", color: active ? t.color : "#6B7268",
+                fontSize: 12, fontWeight: 600,
+              }}>
+                <span style={{ fontSize: 16 }}>{t.icon}</span>
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {type === "arbeit" && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <div>
+                <label style={lbl}>Beginn</label>
+                <input type="time" value={start} onChange={(e) => setStart(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <label style={lbl}>Ende</label>
+                <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
+            <label style={lbl}>Pause (Minuten)</label>
+            <input type="number" step="5" value={pause} onChange={(e) => setPause(e.target.value)} style={inputStyle} />
+            <div style={{ marginTop: 10, fontSize: 13, color: "#6B7268" }}>
+              Ergibt <b style={{ color: INK, fontFamily: MONO }}>{berechnet.toFixed(2)} Std.</b>
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={lbl}>Notiz (optional)</label>
+          <input
+            type="text" value={notiz} placeholder="z. B. Homeoffice, Projekt X"
+            onChange={(e) => setNotiz(e.target.value)}
+            style={{ ...inputStyle, fontFamily: BODY, fontSize: 14 }}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          {existing && (
+            <button onClick={() => onSave(day, "leer", null)} style={{ ...btnGhost, color: RUST, borderColor: RUST + "55" }}>
+              🗑 Löschen
+            </button>
+          )}
+          <button onClick={() => onSave(day, type, type === "arbeit" ? { start, end, pause, notiz } : { notiz })} style={{ ...btnPrimary, flex: 1 }}>
+            Speichern
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ settings, onSave, onClose }) {
+  const [sollProTag, setSollProTag] = useState(settings.sollProTag);
+  const [urlaubProJahr, setUrlaubProJahr] = useState(settings.urlaubProJahr);
+  const [urlaubUebertrag, setUrlaubUebertrag] = useState(settings.urlaubUebertrag ?? 0);
+  const [startDatum, setStartDatum] = useState(settings.startDatum || "");
+  const [anfangsSaldo, setAnfangsSaldo] = useState(settings.anfangsSaldo ?? 0);
+  const [firmenname, setFirmenname] = useState(settings.firmenname || "");
+  const [mitarbeitername, setMitarbeitername] = useState(settings.mitarbeitername || "");
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={{ ...sheet, maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 600 }}>Einstellungen</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#8A9088", fontSize: 20 }}>✕</button>
+        </div>
+
+        <label style={lbl}>Mitarbeiter</label>
+        <input type="text" value={mitarbeitername} onChange={(e) => setMitarbeitername(e.target.value)} style={{ ...inputStyle, fontFamily: BODY, fontSize: 15 }} />
+        <label style={{ ...lbl, marginTop: 12 }}>Firma</label>
+        <input type="text" value={firmenname} onChange={(e) => setFirmenname(e.target.value)} style={{ ...inputStyle, fontFamily: BODY, fontSize: 15 }} />
+        <div style={{ fontSize: 11.5, color: "#8A9088", marginTop: 5 }}>Erscheinen im PDF-Bericht.</div>
+
+        <label style={{ ...lbl, marginTop: 14 }}>Sollstunden pro Arbeitstag</label>
+        <input type="number" step="0.5" value={sollProTag} onChange={(e) => setSollProTag(Number(e.target.value))} style={inputStyle} />
+
+        <label style={{ ...lbl, marginTop: 12 }}>Urlaubsanspruch pro Jahr (Tage)</label>
+        <input type="number" value={urlaubProJahr} onChange={(e) => setUrlaubProJahr(Number(e.target.value))} style={inputStyle} />
+
+        <label style={{ ...lbl, marginTop: 12 }}>Urlaubsübertrag Vorjahr (Tage)</label>
+        <input type="number" value={urlaubUebertrag} onChange={(e) => setUrlaubUebertrag(Number(e.target.value))} style={inputStyle} />
+        <div style={{ fontSize: 11.5, color: "#8A9088", marginTop: 5 }}>Restanspruch aus dem Vorjahr. Negativ eintragen bei Minusurlaub.</div>
+
+        <label style={{ ...lbl, marginTop: 12 }}>Start der Aufzeichnung</label>
+        <input type="date" value={startDatum} onChange={(e) => setStartDatum(e.target.value)} style={inputStyle} />
+        <div style={{ fontSize: 11.5, color: "#8A9088", marginTop: 5 }}>Tage davor werden bei Soll/Ist nicht mitgezählt.</div>
+
+        <label style={{ ...lbl, marginTop: 12 }}>Korrektur-Saldo (Std., z. B. aus vorheriger App)</label>
+        <input type="number" step="0.5" value={anfangsSaldo} onChange={(e) => setAnfangsSaldo(Number(e.target.value))} style={inputStyle} />
+        <div style={{ fontSize: 11.5, color: "#8A9088", marginTop: 5 }}>Wird einmalig zum Gesamtsaldo addiert (auch negativ möglich).</div>
+
+        <button
+          onClick={() => onSave({
+            sollProTag: Number(sollProTag),
+            urlaubProJahr: Number(urlaubProJahr),
+            urlaubUebertrag: Number(urlaubUebertrag),
+            startDatum: startDatum || null,
+            anfangsSaldo: Number(anfangsSaldo),
+            firmenname,
+            mitarbeitername,
+          })}
+          style={{ ...btnPrimary, width: "100%", marginTop: 16 }}
+        >
+          Speichern
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const overlay = { position: "fixed", inset: 0, background: "rgba(28,35,33,0.35)", display: "flex", alignItems: "flex-end", zIndex: 50 };
+const sheet = { background: PAPER, width: "100%", borderRadius: "12px 12px 0 0", padding: "20px 18px 26px", boxShadow: "0 -4px 24px rgba(0,0,0,0.15)" };
+const lbl = { fontSize: 12, color: "#6B7268", display: "block", marginBottom: 6 };
+const inputStyle = { width: "100%", fontFamily: MONO, fontSize: 18, padding: "10px 12px", border: `1px solid ${PAPER_LINE}`, borderRadius: 4, background: "#fff" };
+const btnPrimary = { background: INK, color: "#fff", border: "none", borderRadius: 4, padding: "12px 16px", fontWeight: 600, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 };
+const btnGhost = { background: "#fff", border: "1.5px solid", borderRadius: 4, padding: "12px 14px", fontWeight: 600, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 };
+const thStyle = { textAlign: "left", padding: "6px 4px", fontWeight: 600 };
+const tdStyle = { padding: "6px 4px" };
+
+function PrintReport({ y, m, entries, settings, monthStats, onClose }) {
+  const total = daysInMonth(y, m);
+  const rows = [];
+  for (let d = 1; d <= total; d++) {
+    const entry = entries[dateKey(y, m, d)];
+    if (!entry) continue;
+    const t = TYPES[entry.type];
+    const dateLabel = `${pad(d)}.${pad(m + 1)}.${y}`;
+    let detail = "";
+    if (entry.type === "arbeit") detail = `${entry.start || ""}–${entry.end || ""} (Pause ${entry.pause || 0} Min.)`;
+    if (entry.notiz) detail = detail ? `${detail} · ${entry.notiz}` : entry.notiz;
+    rows.push({ dateLabel, label: t.label, detail, stunden: entry.type === "arbeit" ? entry.stunden : null });
+  }
+
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={{ ...sheet, maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 600 }}>Bericht teilen</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#8A9088", fontSize: 20 }}>✕</button>
+        </div>
+
+        <div className="print-area">
+          <div style={{ fontFamily: DISPLAY, fontSize: 24, fontWeight: 600, marginBottom: 2 }}>
+            Zeiterfassung – {MONTHS[m]} {y}
+          </div>
+          {(settings.firmenname || settings.mitarbeitername) && (
+            <div style={{ fontSize: 13, color: INK, marginBottom: 4 }}>
+              {settings.mitarbeitername && <span>{settings.mitarbeitername}</span>}
+              {settings.mitarbeitername && settings.firmenname && <span> · </span>}
+              {settings.firmenname && <span>{settings.firmenname}</span>}
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#6B7268", marginBottom: 14 }}>Erstellt am {new Date().toLocaleDateString("de-DE")}</div>
+
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, marginBottom: 16 }}>
+            <thead>
+              <tr style={{ borderBottom: `1.5px solid ${INK}` }}>
+                <th style={thStyle}>Datum</th>
+                <th style={thStyle}>Art</th>
+                <th style={thStyle}>Details</th>
+                <th style={{ ...thStyle, textAlign: "right" }}>Stunden</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr><td colSpan={4} style={{ ...tdStyle, color: "#8A9088" }}>Keine Einträge in diesem Monat.</td></tr>
+              )}
+              {rows.map((r, i) => (
+                <tr key={i} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                  <td style={tdStyle}>{r.dateLabel}</td>
+                  <td style={tdStyle}>{r.label}</td>
+                  <td style={tdStyle}>{r.detail}</td>
+                  <td style={{ ...tdStyle, textAlign: "right", fontFamily: MONO }}>{r.stunden != null ? r.stunden.toFixed(2) : "–"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div style={{ borderTop: `2px solid ${INK}`, paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+            <span>Soll: <b style={{ fontFamily: MONO }}>{monthStats.soll.toFixed(1)} Std.</b></span>
+            <span>Ist: <b style={{ fontFamily: MONO }}>{monthStats.ist.toFixed(1)} Std.</b></span>
+            <span>Saldo: <b style={{ fontFamily: MONO, color: monthStats.saldo >= 0 ? TEAL : RUST }}>{fmtHours(monthStats.saldo)} Std.</b></span>
+          </div>
+          <div style={{ marginTop: 6, fontSize: 12, color: "#6B7268" }}>
+            Urlaub: {monthStats.urlaubTage} · Krank: {monthStats.krankTage} · Feiertag: {monthStats.feiertagTage} · Abbau: {monthStats.abbauTage}
+          </div>
+        </div>
+
+        <button className="no-print" onClick={() => window.print()} style={{ ...btnPrimary, width: "100%", marginTop: 18 }}>
+          📤 Drucken / Als PDF speichern
+        </button>
+        <div className="no-print" style={{ fontSize: 11.5, color: "#8A9088", marginTop: 8, textAlign: "center" }}>
+          Im Druckdialog „Als PDF speichern" wählen, um die Datei zu versenden.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BalanceChart({ data, onClose }) {
+  const H = 160;
+  const maxAbs = Math.max(1, ...data.map((d) => Math.abs(d.laufsaldo)));
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={sheet} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 600 }}>Saldo-Verlauf</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#8A9088", fontSize: 20 }}>✕</button>
+        </div>
+        <div style={{ fontSize: 12, color: "#6B7268", marginBottom: 12 }}>Kumulierter Stundensaldo je Monat</div>
+
+        {data.length === 0 ? (
+          <div style={{ padding: "30px 0", textAlign: "center", color: "#8A9088", fontSize: 13 }}>
+            Noch keine Daten für ein Diagramm vorhanden.
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "stretch", gap: 4, height: H, position: "relative", overflowX: "auto", paddingTop: 14 }}>
+            <div style={{ position: "absolute", top: 14 + H / 2, left: 0, right: 0, borderTop: `1px solid ${PAPER_LINE}` }} />
+            {data.map((d, i) => {
+              const barPx = (Math.abs(d.laufsaldo) / maxAbs) * (H / 2 - 12);
+              const positive = d.laufsaldo >= 0;
+              return (
+                <div key={i} style={{ minWidth: 30, flex: "1 0 auto", position: "relative", height: H }}>
+                  <div style={{
+                    position: "absolute", left: "50%", transform: "translateX(-50%)",
+                    width: 16, borderRadius: 2,
+                    background: positive ? TEAL : RUST,
+                    top: positive ? (H / 2 - barPx) : H / 2,
+                    height: Math.max(2, barPx),
+                  }} />
+                  <div style={{
+                    position: "absolute", left: "50%", transform: "translateX(-50%)",
+                    top: positive ? (H / 2 - barPx - 14) : (H / 2 + barPx + 2),
+                    fontSize: 9, fontFamily: MONO, color: "#6B7268", whiteSpace: "nowrap",
+                  }}>
+                    {fmtHours(d.laufsaldo)}
+                  </div>
+                  <div style={{ position: "absolute", bottom: -18, left: "50%", transform: "translateX(-50%)", fontSize: 9.5, color: "#8A9088", whiteSpace: "nowrap" }}>
+                    {d.label}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
